@@ -2,8 +2,7 @@
 
 Exports vehicle telemetry from InfluxDB, attaches bathymetric and tide-corrected
 depth, and produces per-cast dissolved oxygen profiles as a PDF and an
-interactive map. The committed dataset covers Cape Cod Bay, 2026-08-19 to
-2026-08-21.
+interactive map.
 
 ## Layout
 
@@ -17,7 +16,7 @@ data/
   raw/                   unmodified export from InfluxDB
   processed/             depth-augmented export and the per-reading cast table
   bathymetry/            DEM GeoTIFF cache (not committed)
-outputs/                 <callsign>_casts.pdf and <callsign>_casts_map.html
+outputs/                 product PDFs/HTML, assets/, and index.html landing page
 ```
 
 ## Running the pipeline
@@ -29,6 +28,12 @@ export INFLUX_TOKEN=...          # InfluxDB Cloud read token
 python scripts/influx_export.py     --callsign warden-2 --start 2026-08-19T19:00
 python scripts/append_bathymetry.py --callsign warden-2
 python scripts/cast_products.py     --callsign warden-2
+```
+
+Optional naming override for friendlier product names:
+
+```bash
+python scripts/cast_products.py --callsign warden-2 --location "cape-cod-bay"
 ```
 
 `--callsign` is required by all three scripts. It selects the InfluxDB tag value
@@ -61,15 +66,32 @@ this repository.
 
 ## Products
 
-`<callsign>_casts.pdf` has three pages: a 2x5 grid of cast profiles (line length
-against dissolved oxygen, points numbered and coloured by the DO scale, tagged
-points greyed), the survey map, and a methods page listing sources, filtering
-and assumptions.
+`cast_products.py` writes products to `outputs/` using this default pattern:
 
-`<callsign>_casts_map.html` is self-contained apart from the Leaflet and Plotly
-CDNs. Click a station for its cast inset; the `i` control repeats the methods
-notes. Serve it over HTTP rather than opening via `file://` if your browser
-blocks local scripts.
+`<callsign>_<location>_<start>-<end>_casts.pdf`
+
+`<callsign>_<location>_<start>-<end>_casts_map.html`
+
+Where:
+- `<callsign>` is slugged from `--callsign`
+- `<location>` comes from `--location` when provided, otherwise auto-generated
+  from route centroid coordinates
+- `<start>-<end>` is the survey time range in `--timezone`, formatted as
+  `YYYYMMDDTHHMM-YYYYMMDDTHHMM`
+
+The PDF has three pages: a 2x5 grid of cast profiles (line length against
+dissolved oxygen, points numbered and coloured by the DO scale, tagged points
+greyed), the survey map, and a methods page listing sources, filtering and
+assumptions.
+
+The map HTML is self-contained apart from the Leaflet and Plotly CDNs. Click a
+station for its cast inset; the `i` control repeats the methods notes. Serve it
+over HTTP rather than opening via `file://` if your browser blocks local
+scripts.
+
+`outputs/index.html` is regenerated each run as a GitHub Pages-friendly landing
+page with Sedna branding and links to all `.html` and `.pdf` products in
+`outputs/`.
 
 ## Key parameters
 

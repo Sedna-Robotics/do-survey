@@ -28,6 +28,7 @@ from matplotlib.lines import Line2D
 from ncei_dem import data_bounds, fetch_dem
 
 ROOT = Path(__file__).resolve().parents[1]
+LOGO_PATH = ROOT / "outputs/assets/sedna_logo_transparent.png"
 
 
 def slug(callsign):
@@ -106,10 +107,12 @@ def parse_args():
     p.add_argument("--pad-deg", type=float, default=0.02,
                    help="Margin added around the route extent for the map")
     p.add_argument("--refresh-dem", action="store_true", help="Re-download even if a cached DEM covers the area")
+    p.add_argument("--location", default=None,
+             help="General location label for product names (default auto from route centroid)")
     p.add_argument("--derived", default=None,
                    help="Output CSV (default data/processed/<callsign>_casts_derived.csv)")
-    p.add_argument("--pdf", default=None, help="Output PDF (default outputs/<callsign>_casts.pdf)")
-    p.add_argument("--html", default=None, help="Output HTML (default outputs/<callsign>_casts_map.html)")
+    p.add_argument("--pdf", default=None, help="Output PDF (default outputs/<callsign>_<location>_<range>_casts.pdf)")
+    p.add_argument("--html", default=None, help="Output HTML (default outputs/<callsign>_<location>_<range>_casts_map.html)")
     p.add_argument("--timezone", default="America/New_York", help="IANA zone used for displayed cast times")
     args = p.parse_args()
     name = slug(args.callsign)
@@ -117,11 +120,29 @@ def parse_args():
         args.csv = ROOT / f"data/processed/{name}_export_with_depth.csv"
     if args.derived is None:
         args.derived = ROOT / f"data/processed/{name}_casts_derived.csv"
-    if args.pdf is None:
-        args.pdf = ROOT / f"outputs/{name}_casts.pdf"
-    if args.html is None:
-        args.html = ROOT / f"outputs/{name}_casts_map.html"
     return args
+
+
+def slug_text(value):
+    value = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
+    return value.strip("-") or "unknown"
+
+
+def auto_location_label(route):
+    lat = float(route["lat"].mean())
+    lon = float(route["lon"].mean())
+    ns = "n" if lat >= 0 else "s"
+    ew = "e" if lon >= 0 else "w"
+    return f"{abs(lat):.2f}{ns}_{abs(lon):.2f}{ew}".replace(".", "p")
+
+
+def product_base_name(callsign, route, timestamps, timezone, location_override=None):
+    start = timestamps.min().tz_convert(timezone)
+    stop = timestamps.max().tz_convert(timezone)
+    date_range = f"{start:%Y%m%dT%H%M}-{stop:%Y%m%dT%H%M}"
+    callsign_part = slug_text(callsign)
+    location_part = slug_text(location_override) if location_override else auto_location_label(route)
+    return f"{callsign_part}_{location_part}_{date_range}"
 
 
 def do_color(value):
@@ -281,6 +302,190 @@ def draw_notes(fig, callsign):
         y -= 0.016
 
 
+def add_pdf_brand_header(fig):
+    """Add a small Sedna logo in the page header."""
+    if not LOGO_PATH.exists():
+      return
+
+    logo = plt.imread(LOGO_PATH)
+    logo_h, logo_w = logo.shape[:2]
+    aspect = logo_w / logo_h
+
+    fig_w, fig_h = fig.get_size_inches()
+    width_frac = 0.08
+    width_in = fig_w * width_frac
+    height_in = width_in / aspect
+    height_frac = height_in / fig_h
+
+    left = 0.98 - width_frac
+    bottom = 0.98 - height_frac
+    ax_logo = fig.add_axes([left, bottom, width_frac, height_frac], zorder=20)
+    ax_logo.imshow(logo)
+    ax_logo.axis("off")
+
+
+def write_outputs_index(path, title="Sedna Survey Products"):
+    output_dir = path.parent
+    survey_pattern = re.compile(
+      r"^(?P<callsign>[a-z0-9-]+)_(?P<location>[a-z0-9_-]+)_(?P<range>\d{8}T\d{4}-\d{8}T\d{4})_casts$"
+    )
+
+    def humanize_location(raw_location):
+        if re.fullmatch(r"\d+p\d+[ns]_\d+p\d+[ew]", raw_location):
+            lat_raw, lon_raw = raw_location.split("_")
+            lat_val = lat_raw[:-1].replace("p", ".")
+            lon_val = lon_raw[:-1].replace("p", ".")
+            lat = f"{lat_val}°{'N' if lat_raw.endswith('n') else 'S'}"
+            lon = f"{lon_val}°{'E' if lon_raw.endswith('e') else 'W'}"
+            return f"{lat}, {lon}"
+        return raw_location.replace("-", " ").title()
+
+    def humanize_range(raw_range):
+        start_raw, stop_raw = raw_range.split("-")
+        start = pd.to_datetime(start_raw, format="%Y%m%dT%H%M")
+        stop = pd.to_datetime(stop_raw, format="%Y%m%dT%H%M")
+        if start.date() == stop.date():
+            return f"{start:%Y-%m-%d %H:%M} to {stop:%H:%M}"
+        return f"{start:%Y-%m-%d %H:%M} to {stop:%Y-%m-%d %H:%M}"
+
+    surveys = {}
+    for file_path in sorted(output_dir.iterdir()):
+        if not file_path.is_file() or file_path.name == "index.html":
+            continue
+        if file_path.suffix not in {".html", ".pdf"}:
+            continue
+
+        stem = file_path.stem
+        if stem.endswith("_map"):
+            base_stem = stem[:-4]
+            file_kind = "map"
+        else:
+            base_stem = stem
+            file_kind = "pdf"
+
+        entry = surveys.setdefault(base_stem, {"map": None, "pdf": None, "name": None})
+        entry[file_kind] = file_path.name
+
+        match = survey_pattern.match(base_stem)
+        if match:
+            callsign = match.group("callsign").replace("-", " ").title()
+            location = humanize_location(match.group("location"))
+            date_range = humanize_range(match.group("range"))
+            entry["name"] = f"{callsign} | {location} | {date_range}"
+        elif entry["name"] is None:
+            entry["name"] = base_stem.replace("_", " ").replace("-", " ").title()
+
+    ordered = sorted(surveys.items(), key=lambda item: item[0], reverse=True)
+
+    rows = "\n".join(
+        "<li>"
+        f'<div class="surveyName">{meta["name"]}</div>'
+        '<div class="links">'
+        + (f'<a href="{meta["map"]}">Map</a>' if meta["map"] else '<span class="missing">Map</span>')
+        + (f'<a href="{meta["pdf"]}">PDF</a>' if meta["pdf"] else '<span class="missing">PDF</span>')
+        + "</div>"
+        "</li>"
+        for _, meta in ordered
+    ) or '<li><span>No products found yet.</span></li>'
+
+    html_text = f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <title>{title}</title>
+  <style>
+    :root {{
+      --sedna-deep: #0B2C3D;
+      --sedna-teal: #1F5E6E;
+      --sedna-gold: #D9A441;
+      --panel: #ffffff;
+      --ink: #16313f;
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, sans-serif;
+      background: radial-gradient(circle at top right, #1f5e6e 0%, #0b2c3d 55%, #081f2b 100%);
+      color: #f2f6f8;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      box-sizing: border-box;
+    }}
+    .card {{
+      width: min(900px, 96vw);
+      background: rgba(255,255,255,0.96);
+      color: var(--ink);
+      border-radius: 14px;
+      box-shadow: 0 16px 40px rgba(0,0,0,.28);
+      border: 1px solid rgba(11,44,61,.14);
+      overflow: hidden;
+    }}
+    header {{
+      border-bottom: 3px solid var(--sedna-gold);
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: #f6fbfd;
+    }}
+    header img {{ width: 140px; height: auto; }}
+    header h1 {{ margin: 0; font-size: 1.25rem; color: var(--sedna-deep); }}
+    header p {{ margin: 4px 0 0; color: var(--sedna-teal); font-size: .92rem; }}
+    main {{ padding: 18px 20px 20px; }}
+    ul {{ list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }}
+    li {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #f9fcfe;
+      border: 1px solid rgba(31,94,110,.18);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }}
+    .surveyName {{
+      font-weight: 600;
+      color: var(--sedna-deep);
+      padding-right: 12px;
+      line-height: 1.3;
+    }}
+    .links {{
+      display: inline-flex;
+      gap: 10px;
+      min-width: 110px;
+      justify-content: flex-end;
+      align-items: center;
+      flex-shrink: 0;
+    }}
+    a {{ color: var(--sedna-deep); font-weight: 700; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    span {{ color: var(--sedna-teal); font-size: .86rem; }}
+    .missing {{ color: #6f8c96; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <section class=\"card\">
+    <header>
+      <img src=\"assets/sedna_logo_transparent.png\" alt=\"Sedna Robotics logo\">
+      <div>
+        <h1>{title}</h1>
+        <p>Survey maps and PDF reports</p>
+      </div>
+    </header>
+    <main>
+      <ul>
+        {rows}
+      </ul>
+    </main>
+  </section>
+</body>
+</html>
+"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(html_text)
+
+
 def write_pdf(path, casts, dem, extent, route, callsign):
     with PdfPages(path) as pdf:
         fig, axes = plt.subplots(2, 5, figsize=(16, 7.5))
@@ -291,17 +496,20 @@ def write_pdf(path, casts, dem, extent, route, callsign):
         fig.suptitle(f"{callsign} dissolved oxygen casts — grey points tagged not-on-bottom "
                      f"(|winch speed| > {SPEED_THRESHOLD} m/s or line length < {MIN_LINE_LENGTH} m)", fontsize=11)
         fig.tight_layout(rect=(0, 0, 1, 0.95))
+        add_pdf_brand_header(fig)
         pdf.savefig(fig)
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(11, 8.5))
         draw_map(ax, dem, extent, route, casts, callsign)
         fig.tight_layout()
+        add_pdf_brand_header(fig)
         pdf.savefig(fig)
         plt.close(fig)
 
         fig = plt.figure(figsize=(11, 8.5))
         draw_notes(fig, callsign)
+        add_pdf_brand_header(fig)
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -336,20 +544,48 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
-  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #1e1e1e; color: #eee; }
+  :root {
+    --sedna-deep: #0B2C3D;
+    --sedna-teal: #1F5E6E;
+    --sedna-gold: #D9A441;
+    --panel-bg: rgba(255,255,255,.94);
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    font-family: system-ui, sans-serif;
+    background: linear-gradient(140deg, #081f2b 0%, #0b2c3d 100%);
+    color: #eef4f6;
+  }
   #map { position: absolute; inset: 0; }
+  #brandMark {
+    position: absolute;
+    left: 56px;
+    top: 12px;
+    z-index: 1100;
+    background: var(--panel-bg);
+    border: 1px solid rgba(11,44,61,.18);
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.25);
+    padding: 5px 8px;
+  }
+  #brandMark img {
+    display: block;
+    width: 110px;
+    height: auto;
+  }
   #inset { position: absolute; right: 12px; top: 12px; width: 430px; height: 430px;
            background: #ffffff; color: #222; border-radius: 6px; box-shadow: 0 2px 12px rgba(0,0,0,.5);
            display: none; z-index: 1000; }
   #inset .close { position: absolute; right: 8px; top: 4px; cursor: pointer; font-size: 18px; z-index: 1; }
   #chart { width: 100%; height: 100%; }
-  .legend { background: rgba(255,255,255,.92); color: #222; padding: 8px 10px; border-radius: 4px;
+  .legend { background: var(--panel-bg); color: var(--sedna-deep); padding: 8px 10px; border-radius: 4px;
             font-size: 12px; line-height: 18px; }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 50%;
               margin-right: 6px; vertical-align: -1px; }
   .stationLabel { font: 700 11px system-ui; color: #fff; text-align: center; text-shadow: 0 0 2px #000; }
-  .infoBtn { width: 26px; height: 26px; border-radius: 4px; background: rgba(255,255,255,.92);
-             color: #222; font: 700 16px Georgia, serif; text-align: center; line-height: 26px;
+  .infoBtn { width: 26px; height: 26px; border-radius: 4px; background: var(--panel-bg);
+             color: var(--sedna-deep); font: 700 16px Georgia, serif; text-align: center; line-height: 26px;
              cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
   #about { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
            width: min(760px, 92vw); max-height: 84vh; overflow-y: auto; background: #fff; color: #222;
@@ -357,26 +593,43 @@ HTML_TEMPLATE = """<!DOCTYPE html>
            display: none; z-index: 1200; font-size: 13px; line-height: 1.5; }
   #about h2 { margin: 0 0 4px; font-size: 16px; }
   #about h3 { margin: 16px 0 4px; font-size: 13px; text-transform: uppercase;
-              letter-spacing: .04em; color: #1f4e79; }
+              letter-spacing: .04em; color: var(--sedna-teal); }
   #about ul { margin: 0; padding-left: 18px; }
   #about li { margin-bottom: 5px; }
   #about code { background: #f0f0f0; padding: 0 3px; border-radius: 3px; font-size: 12px; }
   #about .close { position: absolute; right: 12px; top: 8px; cursor: pointer; font-size: 22px; }
+  .unitCtrl { background: var(--panel-bg); color: var(--sedna-deep); padding: 6px 8px; border-radius: 4px;
+              font-size: 12px; line-height: 1.2; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+  .unitCtrl label { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; cursor: pointer; }
+  .unitCtrl label:last-child { margin-right: 0; }
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="brandMark"><img src="assets/sedna_logo_transparent.png" alt="Sedna Robotics logo"></div>
 <div id="inset"><span class="close" onclick="document.getElementById('inset').style.display='none'">&times;</span>
   <div id="chart"></div></div>
 <div id="about"><span class="close" onclick="document.getElementById('about').style.display='none'">&times;</span>
   <h2>Sources, filtering and assumptions</h2><div id="aboutBody"></div></div>
 <script>
 const DATA = __PAYLOAD__;
+const METERS_PER_FATHOM = 1.8288;
+let lengthUnit = 'm';
+let selectedCast = null;
 
 function doColor(v) {
   if (v === null || v === undefined || isNaN(v)) return DATA.tagged;
   for (const [lower, color] of DATA.bins) if (v >= lower) return color;
   return DATA.belowZero;
+}
+
+function lengthLabel() {
+  return lengthUnit === 'm' ? 'm' : 'fathoms';
+}
+
+function toDisplayLength(v) {
+  if (v === null || v === undefined || isNaN(v)) return v;
+  return lengthUnit === 'm' ? v : v / METERS_PER_FATHOM;
 }
 
 const map = L.map('map');
@@ -385,12 +638,12 @@ L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Oc
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}',
   { maxZoom: 13 }).addTo(map);
 
-const route = L.polyline(DATA.route, { color: '#000', weight: 2, opacity: 0.9 }).addTo(map);
+const route = L.polyline(DATA.route, { color: '#0B2C3D', weight: 2.5, opacity: 0.95 }).addTo(map);
 map.fitBounds(route.getBounds().pad(0.15));
 
 DATA.casts.forEach(cast => {
   const marker = L.circleMarker([cast.lat, cast.lon], {
-    radius: 10, color: '#222', weight: 1,
+    radius: 10, color: '#0B2C3D', weight: 1,
     fillColor: doColor(cast.min_on_bottom_do), fillOpacity: 1
   }).addTo(map);
   marker.bindTooltip(`Station ${cast.station}<br>min on-bottom DO: ` +
@@ -401,31 +654,36 @@ DATA.casts.forEach(cast => {
 });
 
 function showCast(cast) {
+  selectedCast = cast;
   const pts = cast.samples.filter(s => s.line !== null);
+  const yVals = pts.map(s => toDisplayLength(s.line));
+  const bathyRaw = toDisplayLength(cast.bathy_raw);
+  const bathyTide = toDisplayLength(cast.bathy_tide);
+  const unit = lengthLabel();
   const traces = [{
-    x: pts.map(s => s.do), y: pts.map(s => s.line), mode: 'lines', line: { color: '#bbb', width: 1 },
+    x: pts.map(s => s.do), y: yVals, mode: 'lines', line: { color: '#bbb', width: 1 },
     hoverinfo: 'skip', showlegend: false
   }, {
-    x: pts.map(s => s.do), y: pts.map(s => s.line), mode: 'markers+text',
+    x: pts.map(s => s.do), y: yVals, mode: 'markers+text',
     text: pts.map(s => s.n), textposition: 'middle center',
     textfont: { size: 8, color: '#fff' },
     marker: { size: 18, color: pts.map(s => s.tagged ? DATA.tagged : doColor(s.do)),
               line: { color: '#333', width: 1 } },
     customdata: pts.map(s => [s.speed, s.tagged ? 'not on bottom' : 'on bottom']),
-    hovertemplate: '#%{text}<br>DO %{x:.2f} mg/L<br>line %{y:.2f} m' +
+    hovertemplate: '#%{text}<br>DO %{x:.2f} mg/L<br>line %{y:.2f} ' + unit +
                    '<br>winch %{customdata[0]:.2f} m/s (%{customdata[1]})<extra></extra>',
     showlegend: false
   }];
   const shapes = [
-    { type: 'line', xref: 'paper', x0: 0, x1: 1, y0: cast.bathy_raw, y1: cast.bathy_raw,
+    { type: 'line', xref: 'paper', x0: 0, x1: 1, y0: bathyRaw, y1: bathyRaw,
       line: { color: '#1f4e79', width: 1, dash: 'dash' } },
-    { type: 'line', xref: 'paper', x0: 0, x1: 1, y0: cast.bathy_tide, y1: cast.bathy_tide,
+    { type: 'line', xref: 'paper', x0: 0, x1: 1, y0: bathyTide, y1: bathyTide,
       line: { color: '#1f4e79', width: 1.5, dash: 'dot' } }
   ];
   const annotations = [
-    { xref: 'paper', x: 0.02, y: cast.bathy_raw, text: `bathy ${cast.bathy_raw.toFixed(1)} m`,
+    { xref: 'paper', x: 0.02, y: bathyRaw, text: `bathy ${bathyRaw.toFixed(1)} ${unit}`,
       showarrow: false, font: { size: 9, color: '#1f4e79' }, yanchor: 'bottom', xanchor: 'left' },
-    { xref: 'paper', x: 0.98, y: cast.bathy_tide, text: `tide-corrected ${cast.bathy_tide.toFixed(1)} m`,
+    { xref: 'paper', x: 0.98, y: bathyTide, text: `tide-corrected ${bathyTide.toFixed(1)} ${unit}`,
       showarrow: false, font: { size: 9, color: '#1f4e79' }, yanchor: 'top', xanchor: 'right' }
   ];
   document.getElementById('inset').style.display = 'block';
@@ -434,7 +692,7 @@ function showCast(cast) {
                    `<span style="font-size:10px">${cast.time}</span>`, font: { size: 12 } },
     margin: { l: 55, r: 20, t: 55, b: 45 },
     xaxis: { title: { text: 'Dissolved oxygen (mg/L)', font: { size: 11 } } },
-    yaxis: { title: { text: 'Line length (m)', font: { size: 11 } }, autorange: 'reversed' },
+    yaxis: { title: { text: `Line length (${unit})`, font: { size: 11 } }, autorange: 'reversed' },
     shapes: shapes, annotations: annotations
   }, { displayModeBar: false, responsive: true }).then(() => Plotly.Plots.resize('chart'));
 }
@@ -444,10 +702,28 @@ legend.onAdd = () => {
   const div = L.DomUtil.create('div', 'legend');
   div.innerHTML = '<b>DO</b><br>' +
     DATA.bins.slice().reverse().map(b => `<i style="background:${b[1]}"></i>${b[2]}`).join('<br>') +
-    '<br><b>Route</b> <span style="border-top:2px solid #000;display:inline-block;width:20px;"></span>';
+    '<br><b>Route</b> <span style="border-top:2px solid #0B2C3D;display:inline-block;width:20px;"></span>';
   return div;
 };
 legend.addTo(map);
+
+const units = L.control({ position: 'topright' });
+units.onAdd = () => {
+  const div = L.DomUtil.create('div', 'unitCtrl');
+  div.innerHTML = '<strong>Length units</strong><br>' +
+    '<label><input type="radio" name="length-unit" value="m" checked> meters</label>' +
+    '<label><input type="radio" name="length-unit" value="fathoms"> fathoms</label>';
+  L.DomEvent.disableClickPropagation(div);
+  return div;
+};
+units.addTo(map);
+
+document.querySelectorAll('input[name="length-unit"]').forEach(el => {
+  el.addEventListener('change', (evt) => {
+    lengthUnit = evt.target.value;
+    if (selectedCast) showCast(selectedCast);
+  });
+});
 
 document.getElementById('aboutBody').innerHTML = DATA.provenance
   .map(([title, items]) => `<h3>${title}</h3><ul>${items.map(i => `<li>${i}</li>`).join('')}</ul>`).join('');
@@ -483,6 +759,13 @@ def main():
         "lat": df["global_position_int.lat"] / 1e7,
         "lon": df["global_position_int.lon"] / 1e7,
     }).dropna()
+
+    base = product_base_name(args.callsign, route, df["timestamp"], args.timezone, args.location)
+    if args.pdf is None:
+      args.pdf = ROOT / f"outputs/{base}_casts.pdf"
+    if args.html is None:
+      args.html = ROOT / f"outputs/{base}_casts_map.html"
+
     bounds = data_bounds(route["lat"], route["lon"], args.pad_deg)
     dem_path = args.dem or fetch_dem(
         bounds, args.arcsec,
@@ -495,6 +778,10 @@ def main():
 
     write_html(args.html, casts, route, args.callsign)
     print(f"Wrote {args.html}")
+
+    index_path = ROOT / "outputs/index.html"
+    write_outputs_index(index_path)
+    print(f"Wrote {index_path}")
 
 
 if __name__ == "__main__":
