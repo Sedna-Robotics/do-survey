@@ -1,0 +1,5 @@
+influxdb-client
+matplotlib
+pandas
+rasterio
+requests

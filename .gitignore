@@ -1,0 +1,6 @@
+# Bathymetry rasters are large and reproducible from NOAA; fetch, don't commit.
+data/bathymetry/*.tif
+
+__pycache__/
+*.pyc
+.venv/
