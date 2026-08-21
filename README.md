@@ -16,7 +16,8 @@ data/
   raw/                   unmodified export from InfluxDB
   processed/             depth-augmented export and the per-reading cast table
   bathymetry/            DEM GeoTIFF cache (not committed)
-outputs/                 product PDFs/HTML, assets/, and index.html landing page
+outputs/                 product PDFs/HTML and assets/
+index.html               GitHub Pages landing page linking output products
 ```
 
 ## Running the pipeline
@@ -89,9 +90,9 @@ station for its cast inset; the `i` control repeats the methods notes. Serve it
 over HTTP rather than opening via `file://` if your browser blocks local
 scripts.
 
-`outputs/index.html` is regenerated each run as a GitHub Pages-friendly landing
-page with Sedna branding and links to all `.html` and `.pdf` products in
-`outputs/`.
+`index.html` (repo root) is regenerated each run as a GitHub Pages-friendly
+landing page with Sedna branding and links to all `.html` and `.pdf` products
+in `outputs/`.
 
 ## Key parameters
 

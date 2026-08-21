@@ -324,8 +324,8 @@ def add_pdf_brand_header(fig):
     ax_logo.axis("off")
 
 
-def write_outputs_index(path, title="Sedna Survey Products"):
-    output_dir = path.parent
+def write_outputs_index(path, products_dir, title="Sedna Survey Products"):
+    output_dir = products_dir
     survey_pattern = re.compile(
       r"^(?P<callsign>[a-z0-9-]+)_(?P<location>[a-z0-9_-]+)_(?P<range>\d{8}T\d{4}-\d{8}T\d{4})_casts$"
     )
@@ -364,7 +364,7 @@ def write_outputs_index(path, title="Sedna Survey Products"):
             file_kind = "pdf"
 
         entry = surveys.setdefault(base_stem, {"map": None, "pdf": None, "name": None})
-        entry[file_kind] = file_path.name
+        entry[file_kind] = f"outputs/{file_path.name}"
 
         match = survey_pattern.match(base_stem)
         if match:
@@ -467,7 +467,7 @@ def write_outputs_index(path, title="Sedna Survey Products"):
 <body>
   <section class=\"card\">
     <header>
-      <img src=\"assets/sedna_logo_transparent.png\" alt=\"Sedna Robotics logo\">
+      <img src=\"outputs/assets/sedna_logo_transparent.png\" alt=\"Sedna Robotics logo\">
       <div>
         <h1>{title}</h1>
         <p>Survey maps and PDF reports</p>
@@ -779,8 +779,8 @@ def main():
     write_html(args.html, casts, route, args.callsign)
     print(f"Wrote {args.html}")
 
-    index_path = ROOT / "outputs/index.html"
-    write_outputs_index(index_path)
+    index_path = ROOT / "index.html"
+    write_outputs_index(index_path, ROOT / "outputs")
     print(f"Wrote {index_path}")
 
 
