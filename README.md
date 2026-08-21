@@ -2,7 +2,7 @@
 
 Exports vehicle telemetry from InfluxDB, attaches bathymetric and tide-corrected
 depth, and produces per-cast dissolved oxygen profiles as a PDF and an
-interactive map.
+interactive nautical chart.
 
 ## Layout
 
@@ -10,7 +10,7 @@ interactive map.
 scripts/
   influx_export.py       InfluxDB -> data/raw/<callsign>_export.csv
   append_bathymetry.py   + depth columns -> data/processed/<callsign>_export_with_depth.csv
-  cast_products.py       derived cast table, PDF and interactive map
+  cast_products.py       derived cast table, PDF and interactive chart
   ncei_dem.py            fetches DEM tiles from NOAA NCEI for a given extent
 data/
   raw/                   unmodified export from InfluxDB
@@ -71,7 +71,7 @@ this repository.
 
 `<callsign>_<location>_<start>-<end>_casts.pdf`
 
-`<callsign>_<location>_<start>-<end>_casts_map.html`
+`<callsign>_<location>_<start>-<end>_casts_chart.html`
 
 Where:
 - `<callsign>` is slugged from `--callsign`
@@ -82,10 +82,10 @@ Where:
 
 The PDF has three pages: a 2x5 grid of cast profiles (line length against
 dissolved oxygen, points numbered and coloured by the DO scale, tagged points
-greyed), the survey map, and a methods page listing sources, filtering and
+greyed), the survey chart, and a methods page listing sources, filtering and
 assumptions.
 
-The map HTML is self-contained apart from the Leaflet and Plotly CDNs. Click a
+The chart HTML is self-contained apart from the Leaflet and Plotly CDNs. Click a
 station for its cast inset; the `i` control repeats the methods notes. Serve it
 over HTTP rather than opening via `file://` if your browser blocks local
 scripts.

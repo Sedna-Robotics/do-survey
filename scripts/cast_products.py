@@ -1,9 +1,9 @@
-"""Build the derived cast dataset and the PDF / interactive map products.
+"""Build the derived cast dataset and the PDF / interactive chart products.
 
 Reads the depth-augmented export (left untouched) and writes:
   <callsign>_casts_derived.csv  one row per DO reading, with on-bottom tagging
-  <callsign>_casts.pdf          per-cast profile plots, a map, and a methods page
-  <callsign>_casts_map.html     Leaflet map, click a station for its inset plot
+  <callsign>_casts.pdf          per-cast profile plots, a chart, and a methods page
+  <callsign>_casts_chart.html   Leaflet nautical chart, click a station for its inset plot
 """
 
 import argparse
@@ -68,7 +68,7 @@ def provenance():
             "gaps longer than 30 s are left null.",
             f"A reading is tagged <b>not on bottom</b> when |winch speed| &gt; {SPEED_THRESHOLD} m/s "
             f"or line length &lt; {MIN_LINE_LENGTH} m. Tagged readings are greyed out and excluded from "
-            "the station minimum shown on the map.",
+            "the station minimum shown on the chart.",
             "Seabed elevation is sampled bilinearly from the DEM at each vessel fix.",
         ]),
         ("Assumptions and caveats", [
@@ -112,7 +112,7 @@ def parse_args():
     p.add_argument("--derived", default=None,
                    help="Output CSV (default data/processed/<callsign>_casts_derived.csv)")
     p.add_argument("--pdf", default=None, help="Output PDF (default outputs/<callsign>_<location>_<range>_casts.pdf)")
-    p.add_argument("--html", default=None, help="Output HTML (default outputs/<callsign>_<location>_<range>_casts_map.html)")
+    p.add_argument("--html", default=None, help="Output HTML (default outputs/<callsign>_<location>_<range>_casts_chart.html)")
     p.add_argument("--timezone", default="America/New_York", help="IANA zone used for displayed cast times")
     args = p.parse_args()
     name = slug(args.callsign)
@@ -356,15 +356,21 @@ def write_outputs_index(path, products_dir, title="Sedna Survey Products"):
             continue
 
         stem = file_path.stem
-        if stem.endswith("_map"):
+        if stem.endswith("_chart"):
+            base_stem = stem[:-6]
+            file_kind = "chart"
+        elif stem.endswith("_map"):
             base_stem = stem[:-4]
-            file_kind = "map"
+            file_kind = "chart"
         else:
             base_stem = stem
             file_kind = "pdf"
 
-        entry = surveys.setdefault(base_stem, {"map": None, "pdf": None, "name": None})
-        entry[file_kind] = f"outputs/{file_path.name}"
+        entry = surveys.setdefault(base_stem, {"chart": None, "pdf": None, "name": None})
+        if file_kind == "pdf":
+            entry[file_kind] = f"outputs/{file_path.name}"
+        elif entry["chart"] is None or file_path.name.endswith("_chart.html"):
+            entry["chart"] = f"outputs/{file_path.name}"
 
         match = survey_pattern.match(base_stem)
         if match:
@@ -381,7 +387,7 @@ def write_outputs_index(path, products_dir, title="Sedna Survey Products"):
         "<li>"
         f'<div class="surveyName">{meta["name"]}</div>'
         '<div class="links">'
-        + (f'<a href="{meta["map"]}">Map</a>' if meta["map"] else '<span class="missing">Map</span>')
+        + (f'<a href="{meta["chart"]}">Chart</a>' if meta["chart"] else '<span class="missing">Chart</span>')
         + (f'<a href="{meta["pdf"]}">PDF</a>' if meta["pdf"] else '<span class="missing">PDF</span>')
         + "</div>"
         "</li>"
@@ -470,7 +476,7 @@ def write_outputs_index(path, products_dir, title="Sedna Survey Products"):
       <img src=\"outputs/assets/sedna_logo_transparent.png\" alt=\"Sedna Robotics logo\">
       <div>
         <h1>{title}</h1>
-        <p>Survey maps and PDF reports</p>
+        <p>Survey charts and PDF reports</p>
       </div>
     </header>
     <main>
@@ -557,7 +563,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     background: linear-gradient(140deg, #081f2b 0%, #0b2c3d 100%);
     color: #eef4f6;
   }
-  #map { position: absolute; inset: 0; }
+  #chartMap { position: absolute; inset: 0; }
   #brandMark {
     position: absolute;
     left: 56px;
@@ -605,7 +611,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div id="map"></div>
+<div id="chartMap"></div>
 <div id="brandMark"><img src="assets/sedna_logo_transparent.png" alt="Sedna Robotics logo"></div>
 <div id="inset"><span class="close" onclick="document.getElementById('inset').style.display='none'">&times;</span>
   <div id="chart"></div></div>
@@ -632,25 +638,25 @@ function toDisplayLength(v) {
   return lengthUnit === 'm' ? v : v / METERS_PER_FATHOM;
 }
 
-const map = L.map('map');
+const chartMap = L.map('chartMap');
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}',
-  { maxZoom: 13, attribution: 'Esri World Ocean Base' }).addTo(map);
+  { maxZoom: 13, attribution: 'Esri World Ocean Base' }).addTo(chartMap);
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}',
-  { maxZoom: 13 }).addTo(map);
+  { maxZoom: 13 }).addTo(chartMap);
 
-const route = L.polyline(DATA.route, { color: '#0B2C3D', weight: 2.5, opacity: 0.95 }).addTo(map);
-map.fitBounds(route.getBounds().pad(0.15));
+const route = L.polyline(DATA.route, { color: '#0B2C3D', weight: 2.5, opacity: 0.95 }).addTo(chartMap);
+chartMap.fitBounds(route.getBounds().pad(0.15));
 
 DATA.casts.forEach(cast => {
   const marker = L.circleMarker([cast.lat, cast.lon], {
     radius: 10, color: '#0B2C3D', weight: 1,
     fillColor: doColor(cast.min_on_bottom_do), fillOpacity: 1
-  }).addTo(map);
+  }).addTo(chartMap);
   marker.bindTooltip(`Station ${cast.station}<br>min on-bottom DO: ` +
     (cast.min_on_bottom_do === null ? 'n/a' : cast.min_on_bottom_do.toFixed(2) + ' mg/L'));
   marker.on('click', () => showCast(cast));
   L.marker([cast.lat, cast.lon], { interactive: false,
-    icon: L.divIcon({ className: 'stationLabel', html: cast.station, iconSize: [16, 16] }) }).addTo(map);
+    icon: L.divIcon({ className: 'stationLabel', html: cast.station, iconSize: [16, 16] }) }).addTo(chartMap);
 });
 
 function showCast(cast) {
@@ -705,7 +711,7 @@ legend.onAdd = () => {
     '<br><b>Route</b> <span style="border-top:2px solid #0B2C3D;display:inline-block;width:20px;"></span>';
   return div;
 };
-legend.addTo(map);
+legend.addTo(chartMap);
 
 const units = L.control({ position: 'topright' });
 units.onAdd = () => {
@@ -716,7 +722,7 @@ units.onAdd = () => {
   L.DomEvent.disableClickPropagation(div);
   return div;
 };
-units.addTo(map);
+units.addTo(chartMap);
 
 document.querySelectorAll('input[name="length-unit"]').forEach(el => {
   el.addEventListener('change', (evt) => {
@@ -737,7 +743,7 @@ info.onAdd = () => {
   div.onclick = () => { document.getElementById('about').style.display = 'block'; };
   return div;
 };
-info.addTo(map);
+info.addTo(chartMap);
 </script>
 </body>
 </html>
@@ -764,7 +770,7 @@ def main():
     if args.pdf is None:
       args.pdf = ROOT / f"outputs/{base}_casts.pdf"
     if args.html is None:
-      args.html = ROOT / f"outputs/{base}_casts_map.html"
+      args.html = ROOT / f"outputs/{base}_casts_chart.html"
 
     bounds = data_bounds(route["lat"], route["lon"], args.pad_deg)
     dem_path = args.dem or fetch_dem(
