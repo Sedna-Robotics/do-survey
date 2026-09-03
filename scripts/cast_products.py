@@ -561,8 +561,7 @@ def write_pdf(path, casts, dem, extent, route, callsign, tide_station, vdatum_of
             draw_cast(ax, cast)
         for ax in axes.ravel()[len(casts):]:
             ax.axis("off")
-        fig.suptitle(f"{callsign} dissolved oxygen casts — grey points tagged not-on-bottom "
-                     f"(|winch speed| > {SPEED_THRESHOLD} m/s or line length < {MIN_LINE_LENGTH} m)", fontsize=11)
+        fig.suptitle(f"{callsign} dissolved oxygen casts — grey points tagged not-on-bottom", fontsize=11)
         fig.tight_layout(rect=(0, 0, 1, 0.95))
         add_pdf_brand_header(fig)
         pdf.savefig(fig)
