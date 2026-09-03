@@ -306,7 +306,7 @@ def draw_cast(ax, cast):
     ax.tick_params(labelsize=6)
     ax.invert_yaxis()
     ax.grid(alpha=0.25, lw=0.5)
-    ax.legend(fontsize=5.5, loc="lower left", framealpha=0.9)
+    ax.legend(fontsize=5.5, loc="lower right", framealpha=0.9)
 
 
 def load_dem(dem_path, bounds):
