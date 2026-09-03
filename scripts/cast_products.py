@@ -52,7 +52,8 @@ def provenance():
             "Vehicle telemetry: InfluxDB Cloud bucket <code>"
             + os.environ.get("INFLUX_BUCKET", "warden")
             + "</code>, callsign <code>__CALLSIGN__</code>, "
-            "measurements <code>global_position_int</code>, <code>winch_status</code>, <code>profile_sample</code>.",
+            "measurements <code>global_position_int</code>, <code>winch-status</code> (warden-2) "
+            "or <code>winch_status2</code> (other vehicles), and <code>profile_sample</code>.",
             "Bathymetry: NOAA NCEI best-available DEM mosaic (<code>DEM_mosaics/DEM_all</code> ImageServer). "
             "In this area the mosaic is fed by the CUDEM 1/9 arc-second tiles "
             "<code>ncei19_n41x75/n42x00_w070x25/w070x50_2021v1</code>, exported at 1/3 arc-second (~10 m).",
@@ -66,9 +67,10 @@ def provenance():
             "<code>profile_sample</code> kept at its native 30 s rate.",
             "Winch line length and speed are linearly interpolated in time onto each DO sample timestamp; "
             "gaps longer than 30 s are left null.",
-            f"A reading is tagged <b>not on bottom</b> when |winch speed| &gt; {SPEED_THRESHOLD} m/s "
-            f"or line length &lt; {MIN_LINE_LENGTH} m. Tagged readings are greyed out and excluded from "
-            "the station minimum shown on the chart.",
+            f"For warden-2, a reading is tagged <b>not on bottom</b> when |winch speed| &gt; {SPEED_THRESHOLD} m/s "
+            f"or line length &lt; {MIN_LINE_LENGTH} m. Other vehicles are tagged when winch "
+            "<code>state_enum</code> is not 3 (on-bottom). Tagged readings are greyed out and excluded "
+            "from the station minimum shown on the chart.",
             "Seabed elevation is sampled bilinearly from the DEM at each vessel fix.",
         ]),
         ("Assumptions and caveats", [
@@ -155,8 +157,11 @@ def do_color(value):
 
 
 def build_derived(df):
-    winch = df.loc[df["winch_status.line_length"].notna(),
-                   ["timestamp", "winch_status.line_length", "winch_status.speed"]].sort_values("timestamp")
+    state_column = "winch_status.state_enum"
+    uses_winch_state = state_column in df.columns
+    winch_columns = ["timestamp", "winch_status.line_length"]
+    winch_columns.append(state_column if uses_winch_state else "winch_status.speed")
+    winch = df.loc[df["winch_status.line_length"].notna(), winch_columns].sort_values("timestamp")
     samples = df[df["profile_sample.profile_id"].notna()].copy().sort_values("timestamp")
 
     # The 1 Hz winch series has occasional dropouts, so interpolate rather than
@@ -164,10 +169,19 @@ def build_derived(df):
     wt = winch["timestamp"].astype("int64").to_numpy()
     st = samples["timestamp"].astype("int64").to_numpy()
     line_length = np.interp(st, wt, winch["winch_status.line_length"].to_numpy())
-    speed = np.interp(st, wt, winch["winch_status.speed"].to_numpy())
     gap = np.abs(wt[np.searchsorted(wt, st).clip(0, len(wt) - 1)] - st) / 1e9
     line_length[gap > 30] = np.nan
-    speed[gap > 30] = np.nan
+    if uses_winch_state:
+        state_index = np.searchsorted(wt, st, side="right") - 1
+        state_valid = state_index >= 0
+        state_index = state_index.clip(0, len(wt) - 1)
+        state = winch[state_column].to_numpy()[state_index].astype(float)
+        state[~state_valid] = np.nan
+        speed = np.full(len(samples), np.nan)
+    else:
+        state = np.full(len(samples), np.nan)
+        speed = np.interp(st, wt, winch["winch_status.speed"].to_numpy())
+        speed[gap > 30] = np.nan
 
     out = pd.DataFrame({
         "timestamp": samples["timestamp"].to_numpy(),
@@ -179,11 +193,15 @@ def build_derived(df):
         "temperature_c": samples["profile_sample.temperature_c"].to_numpy(),
         "line_length_m": line_length,
         "winch_speed_ms": speed,
+        "winch_state_enum": state,
         "bathymetry_depth_m": samples["bathymetry_depth_m"].to_numpy(),
         "tide_adjusted_depth_m": samples["tide_adjusted_depth_m"].to_numpy(),
     })
-    out["not_on_bottom"] = ((out["winch_speed_ms"].abs() > SPEED_THRESHOLD)
-                            | (out["line_length_m"] < MIN_LINE_LENGTH))
+    if uses_winch_state:
+        out["not_on_bottom"] = out["winch_state_enum"] != 3
+    else:
+        out["not_on_bottom"] = ((out["winch_speed_ms"].abs() > SPEED_THRESHOLD)
+                                | (out["line_length_m"] < MIN_LINE_LENGTH))
 
     # Order casts chronologically and give them 1-based station numbers.
     order = out.groupby("profile_id")["timestamp"].min().sort_values()

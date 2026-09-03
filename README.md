@@ -65,6 +65,21 @@ relative to this directory, so the scripts work from any working directory.
 `INFLUX_URL`, `INFLUX_ORG` and `INFLUX_BUCKET`. No credentials are stored in
 this repository.
 
+## Winch Telemetry And Cast Filtering
+
+The exporter normalizes both winch telemetry formats to `winch_status` columns
+in the raw CSV. `warden-2` reads `winch-status.line_length` and
+`winch-status.speed`; all other callsigns read `winch_status2.line_length_m`
+and `winch_status2.state_enum`. Thus downstream processing always uses
+`winch_status.line_length`, plus `winch_status.speed` for warden-2 or
+`winch_status.state_enum` for other vehicles.
+
+For `winch_status2`, cast readings are on-bottom only when the latest reported
+`state_enum` is `3`. That state persists until a newer state is reported, as in
+the onboard AWS upload filter. For `warden-2`, the legacy rule applies: a
+reading is tagged not-on-bottom when its winch speed exceeds
+`SPEED_THRESHOLD` or its line length is below `MIN_LINE_LENGTH`.
+
 ## Products
 
 `cast_products.py` writes products to `outputs/` using this default pattern:
@@ -100,8 +115,8 @@ Defined at the top of `scripts/cast_products.py`:
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
-| `SPEED_THRESHOLD` | 0.3 m/s | above this winch speed a reading is tagged not-on-bottom |
-| `MIN_LINE_LENGTH` | 1.5 m | below this line length a reading is tagged not-on-bottom |
+| `SPEED_THRESHOLD` | 0.3 m/s | warden-2: above this winch speed a reading is tagged not-on-bottom |
+| `MIN_LINE_LENGTH` | 1.5 m | warden-2: below this line length a reading is tagged not-on-bottom |
 | `VDATUM_OFFSET_M` | -1.764 m | MLLW to NAVD88 offset quoted in the methods notes |
 | `TIDE_STATION` | 8447241 | NOAA CO-OPS station, Sesuit Harbor |
 

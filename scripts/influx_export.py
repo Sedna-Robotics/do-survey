@@ -2,7 +2,7 @@
 
 global_position_int: lat/lon/alt/hdg, downsampled to 1 Hz
 profile_sample:      all fields, native rate
-winch_status:        line_length/speed, downsampled to 1 Hz
+winch-status / winch_status2: line_length/speed, downsampled to 1 Hz
 """
 
 import argparse
@@ -30,7 +30,10 @@ INFLUX_BUCKET = os.environ.get("INFLUX_BUCKET", "warden")
 # measurement -> fields (None = all fields)
 DOWNSAMPLED = {
     "global_position_int": ["lat", "lon", "alt", "hdg"],
-    "winch_status": ["line_length", "speed"],
+}
+OUTPUT_DOWNSAMPLED = {
+    **DOWNSAMPLED,
+    "winch_status": ["line_length", "speed", "state_enum"],
 }
 FULL_RATE = {"profile_sample": None}
 
@@ -82,6 +85,12 @@ schema.tagValues(bucket: "{INFLUX_BUCKET}", tag: "callsign", start: {fmt(start)}
     raise SystemExit(f"callsign {wanted!r} not found. Available: {values}")
 
 
+def winch_spec(callsign):
+    if callsign.lower() == "warden-2":
+        return "winch-status", ["line_length", "speed"]
+    return "winch_status2", ["line_length_m", "state_enum"]
+
+
 def _selector(spec):
     clauses = []
     for measurement, fields in spec.items():
@@ -115,6 +124,11 @@ def run(client, query, attempts=5):
 
 
 def fetch(client, callsign, start, stop, chunk_minutes):
+    source_winch_measurement, source_winch_fields = winch_spec(callsign)
+    downsampled = {
+        **DOWNSAMPLED,
+        source_winch_measurement: source_winch_fields,
+    }
     frames = []
     for win_start, win_stop in windows(start, stop, chunk_minutes):
         base = f'''
@@ -124,8 +138,9 @@ from(bucket: "{INFLUX_BUCKET}")
 '''
         chunk = pd.concat([
             run(client, f'''{base}
-  |> filter(fn: (r) => {_selector(DOWNSAMPLED)})
+    |> filter(fn: (r) => {_selector(downsampled)})
   |> aggregateWindow(every: 1s, fn: last, createEmpty: false)
+    |> map(fn: (r) => ({{r with _measurement: if r._measurement == "{source_winch_measurement}" then "winch_status" else r._measurement, _field: if r._field == "line_length_m" then "line_length" else r._field}}))
 '''),
             run(client, f'''{base}
   |> filter(fn: (r) => {_selector(FULL_RATE)})
@@ -168,7 +183,7 @@ def main():
 
     ordered = [
         f"{m}.{f}"
-        for m, fields in (*DOWNSAMPLED.items(), *FULL_RATE.items())
+        for m, fields in (*OUTPUT_DOWNSAMPLED.items(), *FULL_RATE.items())
         for f in (fields if fields else sorted(df.loc[df.measurement == m, "field"].unique()))
         if f"{m}.{f}" in wide.columns
     ]
