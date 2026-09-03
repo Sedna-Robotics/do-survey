@@ -11,6 +11,7 @@ NAVD88 with a VDatum offset computed at the track centroid.
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -28,6 +29,8 @@ def slug(callsign):
     return callsign.strip().lower().replace(" ", "-")
 
 COOPS_URL = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+COOPS_STATIONS_URL = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json"
+NCEI_IDENTIFY_URL = "https://gis.ngdc.noaa.gov/arcgis/rest/services/DEM_mosaics/DEM_all/ImageServer/identify"
 VDATUM_URL = "https://vdatum.noaa.gov/vdatumweb/api/convert"
 
 
@@ -44,7 +47,8 @@ def parse_args():
     p.add_argument("--refresh-dem", action="store_true", help="Re-download even if a cached DEM covers the area")
     p.add_argument("--out", default=None,
                    help="Output CSV (default data/processed/<callsign>_export_with_depth.csv)")
-    p.add_argument("--station", default="8447241", help="NOAA CO-OPS station (default Sesuit Harbor, East Dennis)")
+    p.add_argument("--station", default=None,
+                   help="NOAA CO-OPS station override (default: nearest water-level station)")
     args = p.parse_args()
     name = slug(args.callsign)
     if args.csv is None:
@@ -95,6 +99,34 @@ def mllw_to_navd88(lat, lon):
     return offset, float(payload.get("uncertainty", "nan"))
 
 
+def great_circle_distance_m(lat_a, lon_a, lat_b, lon_b):
+    radius_m = 6_371_000.0
+    lat_delta = math.radians(lat_b - lat_a)
+    lon_delta = math.radians(lon_b - lon_a)
+    value = (math.sin(lat_delta / 2) ** 2
+             + math.cos(math.radians(lat_a)) * math.cos(math.radians(lat_b))
+             * math.sin(lon_delta / 2) ** 2)
+    return 2 * radius_m * math.asin(math.sqrt(value))
+
+
+def nearest_water_level_station(lat, lon):
+    response = requests.get(COOPS_STATIONS_URL, params={"type": "waterlevels"}, timeout=60)
+    response.raise_for_status()
+    nearest = None
+    nearest_distance_m = None
+    for station in response.json().get("stations", []):
+        try:
+            distance_m = great_circle_distance_m(lat, lon, float(station["lat"]), float(station["lng"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if nearest_distance_m is None or distance_m < nearest_distance_m:
+            nearest = station
+            nearest_distance_m = distance_m
+    if nearest is None:
+        raise RuntimeError("CO-OPS station metadata contained no usable water-level stations")
+    return str(nearest["id"]), str(nearest.get("name", "unknown")), nearest_distance_m
+
+
 def tide_predictions(station, start, stop):
     r = requests.get(COOPS_URL, params={
         "product": "predictions", "application": "do-survey",
@@ -111,6 +143,26 @@ def tide_predictions(station, start, stop):
     tide["t"] = pd.to_datetime(tide["t"], utc=True)
     tide["v"] = tide["v"].astype(float)
     return tide.set_index("t")["v"].sort_index()
+
+
+def tide_adjusted_bathymetry_depth_m(lat, lon, timestamp):
+    response = requests.get(NCEI_IDENTIFY_URL, params={
+        "geometry": f'{{"x":{lon},"y":{lat},"spatialReference":{{"wkid":4326}}}}',
+        "geometryType": "esriGeometryPoint",
+        "returnGeometry": "false",
+        "returnCatalogItems": "false",
+        "f": "json",
+    }, timeout=60)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error") or payload.get("value") is None:
+        raise RuntimeError(f"NCEI identify error: {payload}")
+    elevation_m = float(payload["value"])
+    offset_m, _ = mllw_to_navd88(lat, lon)
+    station, _, _ = nearest_water_level_station(lat, lon)
+    tide_mllw = tide_predictions(station, timestamp - pd.Timedelta(hours=1), timestamp + pd.Timedelta(hours=1))
+    tide_m = np.interp(timestamp.value, tide_mllw.index.astype("int64"), tide_mllw.to_numpy())
+    return tide_m + offset_m - elevation_m
 
 
 def main():
@@ -136,9 +188,14 @@ def main():
     offset, uncertainty = mllw_to_navd88(centroid_lat, centroid_lon)
     print(f"VDatum MLLW->NAVD88 at {centroid_lat:.4f},{centroid_lon:.4f}: {offset:+.3f} m (±{uncertainty:.3f})")
 
+    if args.station:
+        station, station_name = args.station, "user override"
+    else:
+        station, station_name, station_distance_m = nearest_water_level_station(centroid_lat, centroid_lon)
+        print(f"Nearest tide station: {station} {station_name} ({station_distance_m / 1000:.1f} km)")
     start, stop = df["timestamp"].min(), df["timestamp"].max()
-    tide_mllw = tide_predictions(args.station, start - pd.Timedelta(hours=1), stop + pd.Timedelta(hours=1))
-    print(f"Tide station {args.station}: {len(tide_mllw):,} predictions "
+    tide_mllw = tide_predictions(station, start - pd.Timedelta(hours=1), stop + pd.Timedelta(hours=1))
+    print(f"Tide station {station} ({station_name}): {len(tide_mllw):,} predictions "
           f"{tide_mllw.min():.2f}-{tide_mllw.max():.2f} m MLLW")
 
     water_level = np.interp(
@@ -150,6 +207,8 @@ def main():
     df["bathymetry_depth_m"] = -elev
     df["tide_adjusted_depth_m"] = water_level - elev
     df.loc[~fix, "tide_adjusted_depth_m"] = np.nan
+    df["tide_station"] = station
+    df["vdatum_offset_m"] = offset
 
     df.to_csv(args.out, index=False)
     valid = df["bathymetry_depth_m"].notna()

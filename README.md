@@ -58,6 +58,11 @@ fetches at `--arcsec 3` for the map background. Rasters are cached under
 the requested resolution; pass `--refresh-dem` to force a re-download or `--dem`
 to supply your own GeoTIFF.
 
+By default, `append_bathymetry.py` uses the nearest NOAA CO-OPS water-level
+station to the route centroid, matching the onboard AWS filter. Pass
+`--station <id>` to select a specific station instead. The selected station and
+VDatum offset are recorded in the processed CSV and reported in the products.
+
 Every other input and output is overridable; see `--help`. Defaults resolve
 relative to this directory, so the scripts work from any working directory.
 
@@ -75,10 +80,13 @@ and `winch_status2.state_enum`. Thus downstream processing always uses
 `winch_status.state_enum` for other vehicles.
 
 For `winch_status2`, cast readings are on-bottom only when the latest reported
-`state_enum` is `3`. That state persists until a newer state is reported, as in
-the onboard AWS upload filter. For `warden-2`, the legacy rule applies: a
-reading is tagged not-on-bottom when its winch speed exceeds
-`SPEED_THRESHOLD` or its line length is below `MIN_LINE_LENGTH`.
+`state_enum` is `3`. That state persists until a newer state is reported. The
+on-bottom transition must also be within `ON_BOTTOM_BATHY_TOLERANCE_M` of the
+tide-adjusted bathymetry. This gate uses the same NCEI point lookup, VDatum
+conversion, and nearest-station CO-OPS tide calculation as the onboard AWS
+upload filter. For `warden-2`, the legacy rule applies: a reading is tagged
+not-on-bottom when its winch speed exceeds `SPEED_THRESHOLD` or its line length
+is below `MIN_LINE_LENGTH`.
 
 ## Products
 
@@ -117,10 +125,10 @@ Defined at the top of `scripts/cast_products.py`:
 | --- | --- | --- |
 | `SPEED_THRESHOLD` | 0.3 m/s | warden-2: above this winch speed a reading is tagged not-on-bottom |
 | `MIN_LINE_LENGTH` | 1.5 m | warden-2: below this line length a reading is tagged not-on-bottom |
+| `ON_BOTTOM_BATHY_TOLERANCE_M` | 3.0 m | winch_status2: maximum shortfall from bathymetry at on-bottom transition |
 | `VDATUM_OFFSET_M` | -1.764 m | MLLW to NAVD88 offset quoted in the methods notes |
-| `TIDE_STATION` | 8447241 | NOAA CO-OPS station, Sesuit Harbor |
+| `TIDE_STATION` | 8447241 | fallback for legacy processed CSVs only |
 
 `VDATUM_OFFSET_M` is a transcription of the value `append_bathymetry.py`
-computes at runtime. If the survey area changes, update it to match that
-script's output so the methods notes stay accurate. `TIDE_STATION` likewise
-needs to point at a CO-OPS station near the new area.
+computes at runtime. New products read the recorded offset and tide station
+from the processed CSV; the constants are retained only for legacy inputs.

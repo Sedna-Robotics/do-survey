@@ -25,6 +25,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LightSource
 from matplotlib.lines import Line2D
 
+from append_bathymetry import tide_adjusted_bathymetry_depth_m
 from ncei_dem import data_bounds, fetch_dem
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,12 +42,13 @@ DO_BELOW_ZERO = "#000000"
 TAGGED_COLOR = "#b0b0b0"
 SPEED_THRESHOLD = 0.3
 MIN_LINE_LENGTH = 1.5
+ON_BOTTOM_BATHY_TOLERANCE_M = 3.0
 TIDE_STATION = "8447241 Sesuit Harbor, East Dennis (41.7517°N, 70.1550°W)"
 VDATUM_OFFSET_M = -1.764
 VDATUM_UNCERTAINTY_M = 0.117
 
 
-def provenance():
+def provenance(tide_station=TIDE_STATION, vdatum_offset_m=VDATUM_OFFSET_M):
     return [
         ("Data sources", [
             "Vehicle telemetry: InfluxDB Cloud bucket <code>"
@@ -57,20 +59,22 @@ def provenance():
             "Bathymetry: NOAA NCEI best-available DEM mosaic (<code>DEM_mosaics/DEM_all</code> ImageServer). "
             "In this area the mosaic is fed by the CUDEM 1/9 arc-second tiles "
             "<code>ncei19_n41x75/n42x00_w070x25/w070x50_2021v1</code>, exported at 1/3 arc-second (~10 m).",
-            f"Tides: NOAA CO-OPS predictions, station {TIDE_STATION}, datum MLLW, metric, 6-minute interval.",
-            f"Vertical datum transform: NOAA VDatum, MLLW→NAVD88 = {VDATUM_OFFSET_M:+.3f} m "
+            f"Tides: NOAA CO-OPS predictions, station {tide_station}, datum MLLW, metric, 6-minute interval.",
+            f"Vertical datum transform: NOAA VDatum, MLLW→NAVD88 = {vdatum_offset_m:+.3f} m "
             f"(±{VDATUM_UNCERTAINTY_M:.3f} m) evaluated at the track centroid.",
         ]),
         ("Filtering and processing", [
             "<code>global_position_int</code> and <code>winch_status</code> reduced to 1 Hz server-side with "
             "<code>aggregateWindow(every: 1s, fn: last, createEmpty: false)</code>; "
             "<code>profile_sample</code> kept at its native 30 s rate.",
-            "Winch line length and speed are linearly interpolated in time onto each DO sample timestamp; "
-            "gaps longer than 30 s are left null.",
+            "Winch line length (and warden-2 speed) are linearly interpolated in time onto each DO sample "
+            "timestamp; gaps longer than 30 s are left null.",
             f"For warden-2, a reading is tagged <b>not on bottom</b> when |winch speed| &gt; {SPEED_THRESHOLD} m/s "
             f"or line length &lt; {MIN_LINE_LENGTH} m. Other vehicles are tagged when winch "
-            "<code>state_enum</code> is not 3 (on-bottom). Tagged readings are greyed out and excluded "
-            "from the station minimum shown on the chart.",
+            f"<code>state_enum</code> is not 3 (on-bottom), or its on-bottom transition line length is more "
+            f"than {ON_BOTTOM_BATHY_TOLERANCE_M:.1f} m short of tide-adjusted bathymetry evaluated with the "
+            "onboard NOAA NCEI, VDatum, and nearest-station CO-OPS procedure. Tagged readings are greyed "
+            "out and excluded from the station minimum shown on the chart.",
             "Seabed elevation is sampled bilinearly from the DEM at each vessel fix.",
         ]),
         ("Assumptions and caveats", [
@@ -80,8 +84,8 @@ def provenance():
             "Tides are <i>predicted</i> astronomical levels, not observed water levels: storm surge and "
             "wind setup are not represented.",
             "One tide station and one VDatum offset are applied across the whole survey area, so spatial "
-            "variation in tidal phase, range and datum separation is ignored. Sesuit Harbor is a "
-            "subordinate station, derived from a reference station rather than measured harmonics.",
+            "variation in tidal phase, range and datum separation is ignored. The on-bottom filter "
+            "separately evaluates its transition bathymetry at the transition location.",
             "Winch line length is used as the depth proxy for each reading. There is no wire angle or "
             "layback correction, so a reading's true depth is at most its line length.",
             "The Lowell Instruments DOT-2 logger does not report pressure "
@@ -172,14 +176,50 @@ def build_derived(df):
     gap = np.abs(wt[np.searchsorted(wt, st).clip(0, len(wt) - 1)] - st) / 1e9
     line_length[gap > 30] = np.nan
     if uses_winch_state:
-        state_index = np.searchsorted(wt, st, side="right") - 1
+        state_history = df.loc[df[state_column].notna(), [
+            "timestamp", state_column, "winch_status.line_length", "tide_adjusted_depth_m",
+        ]].sort_values("timestamp")
+        positions = df.loc[
+          df["global_position_int.lat"].notna() & df["global_position_int.lon"].notna(),
+          ["timestamp", "global_position_int.lat", "global_position_int.lon"],
+        ].sort_values("timestamp")
+        state_history = pd.merge_asof(state_history, positions, on="timestamp", direction="backward")
+        state_times = state_history["timestamp"].astype("int64").to_numpy()
+        state_values = state_history[state_column].to_numpy()
+        state_index = np.searchsorted(state_times, st, side="right") - 1
         state_valid = state_index >= 0
-        state_index = state_index.clip(0, len(wt) - 1)
-        state = winch[state_column].to_numpy()[state_index].astype(float)
+        state_index = state_index.clip(0, len(state_times) - 1)
+        state = state_values[state_index].astype(float)
         state[~state_valid] = np.nan
+        on_bottom_transition = (state_values == 3) & np.r_[True, state_values[:-1] != 3]
+        transition_index = np.maximum.accumulate(np.where(on_bottom_transition, np.arange(len(state_values)), -1))
+        sample_transition_index = transition_index[state_index]
+        sample_transition_valid = state_valid & (sample_transition_index >= 0)
+        sample_transition_index = sample_transition_index.clip(0, len(state_values) - 1)
+        transition_line_length = state_history["winch_status.line_length"].to_numpy()[sample_transition_index]
+        transition_depths = {}
+        for index in np.unique(sample_transition_index[sample_transition_valid]):
+          transition = state_history.iloc[index]
+          try:
+            transition_depths[index] = tide_adjusted_bathymetry_depth_m(
+              float(transition["global_position_int.lat"]) / 1e7,
+              float(transition["global_position_int.lon"]) / 1e7,
+              transition["timestamp"],
+            )
+          except Exception:
+            transition_depths[index] = np.nan
+        transition_bathymetry = np.array([transition_depths.get(index, np.nan)
+                          for index in sample_transition_index])
+        bathymetry_ok = (sample_transition_valid
+                         & np.isfinite(transition_line_length)
+                         & np.isfinite(transition_bathymetry)
+                         & (transition_bathymetry - transition_line_length <= ON_BOTTOM_BATHY_TOLERANCE_M))
         speed = np.full(len(samples), np.nan)
     else:
         state = np.full(len(samples), np.nan)
+        transition_line_length = np.full(len(samples), np.nan)
+        transition_bathymetry = np.full(len(samples), np.nan)
+        bathymetry_ok = np.full(len(samples), False)
         speed = np.interp(st, wt, winch["winch_status.speed"].to_numpy())
         speed[gap > 30] = np.nan
 
@@ -194,11 +234,15 @@ def build_derived(df):
         "line_length_m": line_length,
         "winch_speed_ms": speed,
         "winch_state_enum": state,
+        "on_bottom_transition_line_length_m": transition_line_length,
+        "on_bottom_transition_tide_adjusted_depth_m": transition_bathymetry,
+        "on_bottom_bathymetry_ok": bathymetry_ok,
         "bathymetry_depth_m": samples["bathymetry_depth_m"].to_numpy(),
         "tide_adjusted_depth_m": samples["tide_adjusted_depth_m"].to_numpy(),
     })
     if uses_winch_state:
-        out["not_on_bottom"] = out["winch_state_enum"] != 3
+        out["not_on_bottom"] = ((out["winch_state_enum"] != 3)
+                                | ~out["on_bottom_bathymetry_ok"])
     else:
         out["not_on_bottom"] = ((out["winch_speed_ms"].abs() > SPEED_THRESHOLD)
                                 | (out["line_length_m"] < MIN_LINE_LENGTH))
@@ -303,11 +347,11 @@ def draw_map(ax, dem, extent, route, casts, callsign):
     ax.legend(handles=handles, fontsize=6, loc="lower left", title="DO", title_fontsize=7, framealpha=0.9)
 
 
-def draw_notes(fig, callsign):
+def draw_notes(fig, callsign, tide_station, vdatum_offset_m):
     """Render the provenance list as a plain-text page."""
     fig.text(0.06, 0.95, "Sources, filtering and assumptions", fontsize=14, weight="bold")
     y = 0.90
-    for title, items in provenance():
+    for title, items in provenance(tide_station, vdatum_offset_m):
         fig.text(0.06, y, title.upper(), fontsize=9, weight="bold", color="#1f4e79")
         y -= 0.022
         for item in items:
@@ -510,7 +554,7 @@ def write_outputs_index(path, products_dir, title="Sedna Survey Products"):
         fh.write(html_text)
 
 
-def write_pdf(path, casts, dem, extent, route, callsign):
+def write_pdf(path, casts, dem, extent, route, callsign, tide_station, vdatum_offset_m):
     with PdfPages(path) as pdf:
         fig, axes = plt.subplots(2, 5, figsize=(16, 7.5))
         for ax, cast in zip(axes.ravel(), casts):
@@ -532,7 +576,7 @@ def write_pdf(path, casts, dem, extent, route, callsign):
         plt.close(fig)
 
         fig = plt.figure(figsize=(11, 8.5))
-        draw_notes(fig, callsign)
+        draw_notes(fig, callsign, tide_station, vdatum_offset_m)
         add_pdf_brand_header(fig)
         pdf.savefig(fig)
         plt.close(fig)
@@ -543,7 +587,7 @@ def route_geojson(route, step=15):
     return [[round(float(lat), 5), round(float(lon), 5)] for lat, lon in zip(thinned["lat"], thinned["lon"])]
 
 
-def write_html(path, casts, route, callsign):
+def write_html(path, casts, route, callsign, tide_station, vdatum_offset_m):
     payload = {
         "casts": casts,
         "route": route_geojson(route),
@@ -552,7 +596,7 @@ def write_html(path, casts, route, callsign):
         "tagged": TAGGED_COLOR,
         "threshold": SPEED_THRESHOLD,
         "provenance": [[title, [i.replace("__CALLSIGN__", callsign) for i in items]]
-                       for title, items in provenance()],
+                       for title, items in provenance(tide_station, vdatum_offset_m)],
     }
     html_text = HTML_TEMPLATE.replace("__PAYLOAD__", json.dumps(payload)).replace("__CALLSIGN__", callsign)
     with open(path, "w") as fh:
@@ -771,6 +815,9 @@ info.addTo(chartMap);
 def main():
     args = parse_args()
     df = pd.read_csv(args.csv, parse_dates=["timestamp"])
+    tide_station = df["tide_station"].dropna().iloc[0] if "tide_station" in df else TIDE_STATION
+    vdatum_offset_m = (float(df["vdatum_offset_m"].dropna().iloc[0])
+               if "vdatum_offset_m" in df else VDATUM_OFFSET_M)
 
     derived = build_derived(df)
     derived.to_csv(args.derived, index=False)
@@ -797,10 +844,10 @@ def main():
         refresh=args.refresh_dem)
     dem, extent = load_dem(dem_path, bounds)
 
-    write_pdf(args.pdf, casts, dem, extent, route, args.callsign)
+    write_pdf(args.pdf, casts, dem, extent, route, args.callsign, tide_station, vdatum_offset_m)
     print(f"Wrote {args.pdf}")
 
-    write_html(args.html, casts, route, args.callsign)
+    write_html(args.html, casts, route, args.callsign, tide_station, vdatum_offset_m)
     print(f"Wrote {args.html}")
 
     index_path = ROOT / "index.html"
